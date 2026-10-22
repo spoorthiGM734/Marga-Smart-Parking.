@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MARGA – My dashboard</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header id="nav"></header>
+<main class="wrap" style="padding-top:28px;padding-bottom:60px">
+  <div class="row between wrap-sm"><div><h1 id="hi">My dashboard</h1><p class="muted">Manage your bookings, check in, and view receipts.</p></div><a class="btn" href="/search.html">+ Find parking</a></div>
+
+  <div class="grid4 mt">
+    <div class="stat"><b id="sUp">0</b><span>Upcoming</span></div>
+    <div class="stat"><b id="sAct">0</b><span>Parked now</span></div>
+    <div class="stat"><b id="sDone">0</b><span>Completed</span></div>
+    <div class="stat"><b id="sSpent">₹0</b><span>Total spent</span></div>
+  </div>
+
+  <div class="tabs"><button data-t="bk" class="on">My bookings</button><button data-t="veh">My vehicles</button></div>
+
+  <section id="t-bk"><div id="list"></div></section>
+
+  <section id="t-veh" hidden>
+    <div class="grid2" style="align-items:start">
+      <div class="card"><h3>Add a vehicle</h3>
+        <label>Registration number</label><input id="vReg" placeholder="DL01AB1234">
+        <label>Type</label><select id="vType"><option value="car">Car</option><option value="suv">SUV</option><option value="bike">Bike</option></select>
+        <label>Nickname (optional)</label><input id="vLabel">
+        <button class="btn block mt" id="vAdd">Add vehicle</button></div>
+      <div id="vList"></div>
+    </div>
+  </section>
+</main>
+
+<script src="/js/common.js"></script>
+<script>
+  if (requireRole('driver', 'operator', 'admin')) init();
+  let bookings = [];
+
+  function init() {
+    renderNav();
+    $('hi').textContent = 'Hello, ' + store.user.name.split(' ')[0] + ' 👋';
+    document.querySelectorAll('.tabs button').forEach((b) => (b.onclick = () => {
+      document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('on', x === b));
+      $('t-bk').hidden = b.dataset.t !== 'bk'; $('t-veh').hidden = b.dataset.t !== 'veh';
+    }));
+    loadBookings(); loadVehicles();
+  }
+
+  async function loadBookings() {
+    try { bookings = await api('/bookings/mine'); } catch (e) { return toast(e.message, 'err'); }
+    $('sUp').textContent = bookings.filter((b) => b.status === 'confirmed').length;
+    $('sAct').textContent = bookings.filter((b) => b.status === 'checked_in').length;
+    $('sDone').textContent = bookings.filter((b) => b.status === 'completed').length;
+    $('sSpent').textContent = inr(bookings.reduce((a, b) => a + (b.fee || 0), 0));
+    $('list').innerHTML = bookings.length ? bookings.map(card).join('')
+      : '<div class="card"><h3>No bookings yet</h3><p class="muted">Search for parking near your destination to make your first reservation.</p></div>';
+  }
+
+  function card(b) {
+    const act = b.status === 'checked_in';
+    return `<div class="card bk">
+      <div class="row between"><div><h3>${esc(b.facility_name)}</h3><p class="muted">${esc(b.facility_address)}</p></div>${badge(b.status)}</div>
+      <div class="kv"><span>Slot</span><b>${esc(b.slot_label)}</b><span>Vehicle</span><b>${esc(b.reg_no)}</b><span>Time</span><b>${fmt(b.start_time)} → ${fmt(b.end_time)}</b><span>Reference</span><b>${esc(b.ref)}</b></div>
+      ${b.mismatch ? `<div class="warn-box">You parked in <b>${esc(b.actual_slot_label)}</b> instead of ${esc(b.slot_label)}. ${b.resolution_note ? 'Operator note: ' + esc(b.resolution_note) : 'The operator has been notified.'}</div>` : ''}
+      ${act ? `<p class="muted">Running fee so far: <b style="color:var(--lime)">${inr(b.fee_estimate)}</b> · ${b.occupancy_verified ? 'verified by operator' : 'occupancy unverified'}</p>` : ''}
+      ${b.status === 'completed' ? `<p>Paid <b style="color:var(--lime)">${inr(b.fee)}</b> · ${b.duration_min} min</p>` : ''}
+      ${b.status === 'no_show' ? '<p class="muted">Released because you did not check in within the grace period.</p>' : ''}
+      <div class="row gap wrap-sm mt">
+        ${b.status === 'confirmed' ? `<button class="btn sm" data-a="in" data-id="${b.id}">Check in</button><button class="btn ghost sm" data-a="cancel" data-id="${b.id}">Cancel</button>` : ''}
+        ${act ? `<button class="btn sm" data-a="out" data-id="${b.id}">Check out &amp; pay</button>` : ''}
+        ${b.status === 'completed' ? `<button class="btn ghost sm" data-a="rec" data-id="${b.id}">Receipt</button>` : ''}
+        ${['confirmed', 'checked_in'].includes(b.status) ? `<button class="btn ghost sm" data-a="qr" data-id="${b.id}">QR pass</button><a class="btn ghost sm" target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${b.lat},${b.lng}">Navigate</a>` : ''}
+      </div></div>`;
+  }
+
+  $('list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-a]'); if (!btn) return;
+    const b = bookings.find((x) => x.id === +btn.dataset.id); const a = btn.dataset.a;
+    try {
+      if (a === 'in') await checkinDialog(b, `/bookings/${b.id}/checkin`, true, loadBookings);
+      if (a === 'cancel' && confirm('Cancel this booking?')) { await api(`/bookings/${b.id}/cancel`, { method: 'POST' }); toast('Booking cancelled'); loadBookings(); }
+      if (a === 'out' && confirm('Check out now? Your fee will be calculated from your check-in time.')) { const r = await api(`/bookings/${b.id}/checkout`, { method: 'POST' }); loadBookings(); receiptModal(r); }
+      if (a === 'rec') receiptModal(b);
+      if (a === 'qr') { const r = await api('/bookings/' + b.id); modal(`<h3>${esc(r.slot_label)} · ${esc(r.facility_name)}</h3><div style="text-align:center;margin:14px 0"><img src="${r.qr}" style="width:220px;border-radius:12px"><h2 style="margin-top:8px">${esc(r.ref)}</h2></div><p class="note">Show this code to the operator for verification. It does not prove physical occupancy.</p>`); }
+    } catch (err) { toast(err.message, 'err'); }
+  });
+
+  async function loadVehicles() {
+    const list = await api('/vehicles').catch(() => []);
+    $('vList').innerHTML = list.length ? list.map((v) => `<div class="card row between" style="margin-bottom:12px"><div><h3>${esc(v.reg_no)}</h3><p class="muted">${esc(v.type)} ${v.label ? '· ' + esc(v.label) : ''}</p></div><button class="btn ghost sm" data-del="${v.id}">Remove</button></div>`).join('')
+      : '<div class="card"><p class="muted">No vehicles saved yet.</p></div>';
+  }
+  $('vAdd').onclick = async () => {
+    try { await api('/vehicles', { method: 'POST', body: { reg_no: $('vReg').value, type: $('vType').value, label: $('vLabel').value } }); $('vReg').value = ''; $('vLabel').value = ''; toast('Vehicle added'); loadVehicles(); }
+    catch (e) { toast(e.message, 'err'); }
+  };
+  $('vList').addEventListener('click', async (e) => {
+    const id = e.target.dataset.del; if (!id) return;
+    await api('/vehicles/' + id, { method: 'DELETE' }); loadVehicles();
+  });
+</script>
+</body>
+</html>

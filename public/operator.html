@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MARGA – Operator dashboard</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header id="nav"></header>
+<main class="wrap" style="padding-top:28px;padding-bottom:60px">
+  <div class="row between wrap-sm">
+    <h1>Operator dashboard</h1>
+    <div class="row gap wrap-sm"><select id="facSel" style="min-width:230px"></select><button class="btn" id="newFac">+ Register facility</button></div>
+  </div>
+
+  <div id="empty" class="card mt" hidden><h3>No facilities yet</h3><p class="muted">Register your first parking facility. After admin verification it becomes bookable.</p></div>
+
+  <div id="panel" hidden>
+    <div class="tabs">
+      <button data-t="overview" class="on">Overview</button><button data-t="layout">Layout</button><button data-t="bookings">Bookings &amp; sessions</button>
+    </div>
+
+    <!-- OVERVIEW -->
+    <section id="t-overview">
+      <div id="statusBox"></div>
+      <div class="grid4 mt" id="stats"></div>
+      <div class="card mt row between wrap-sm"><div id="facInfo"></div><button class="btn ghost" id="editFac">Edit details &amp; tariff</button></div>
+    </section>
+
+    <!-- LAYOUT -->
+    <section id="t-layout" hidden>
+      <div class="card">
+        <div class="row between wrap-sm"><h3>Digital layout generator</h3><span id="layoutStatus"></span></div>
+        <p class="note">Enter the site’s measured dimensions. Marga proposes numbered virtual slots using vehicle size, driving aisles and a 1 m safety margin. Review, drag slots to adjust, block any you don’t want, then publish. The layout is only a proposed arrangement – it must be calibrated to the real site and does not certify the land as legally or physically suitable for parking.</p>
+        <div class="grid4">
+          <div><label>Site width (m)</label><input id="gW" type="number" min="5" step="0.5" value="20"></div>
+          <div><label>Site length (m)</label><input id="gL" type="number" min="5" step="0.5" value="15"></div>
+          <div><label>Vehicle type</label><select id="gV"><option value="car">Car (2.5 × 5 m)</option><option value="suv">SUV (2.7 × 5.5 m)</option><option value="bike">Bike (1 × 2 m)</option></select></div>
+          <div><label>Driving aisle (m)</label><input id="gA" type="number" min="3" step="0.5" value="6"></div>
+          <div><label>Spaces to allocate to Marga (0 = max)</label><input id="gM" type="number" min="0" value="5"></div>
+          <div><label>First slot number</label><input id="gS" type="number" min="1" value="31"></div>
+          <div style="grid-column:span 2"><label>Obstacles – one per line: x,y,width,height (metres)</label><textarea id="gO" placeholder="e.g. 8,6,2,2"></textarea></div>
+        </div>
+        <div class="row gap mt wrap-sm"><button class="btn" id="gen">Generate layout</button><button class="btn ghost" id="pub">Publish layout</button></div>
+      </div>
+
+      <div class="grid2 mt" style="grid-template-columns:1.6fr 1fr;align-items:start">
+        <div><div class="layout-box" id="layoutBox"><p class="muted" style="padding:20px">No layout yet.</p></div>
+          <div class="legend"><span><i style="background:rgba(183,255,60,.5)"></i>Free</span><span><i style="background:rgba(255,200,87,.6)"></i>Reserved</span><span><i style="background:rgba(255,107,107,.6)"></i>Occupied</span><span><i style="background:#555b73"></i>Blocked</span></div>
+          <p class="note">Tip: click a slot to select it, or drag it to a new position.</p></div>
+        <div class="card" id="slotPanel"><h3>Slot details</h3><p class="muted mt">Select a slot on the layout.</p></div>
+      </div>
+    </section>
+
+    <!-- BOOKINGS -->
+    <section id="t-bookings" hidden>
+      <div class="row between wrap-sm"><h3>Reservations &amp; parking sessions</h3>
+        <select id="bFilter" style="width:180px"><option value="">All statuses</option><option>confirmed</option><option>checked_in</option><option>completed</option><option>cancelled</option><option>no_show</option></select></div>
+      <div class="card mt scroll-x"><table class="tbl"><thead><tr><th>Ref</th><th>Driver</th><th>Vehicle</th><th>Slot</th><th>Time</th><th>Status</th><th>Actions</th></tr></thead><tbody id="bBody"></tbody></table></div>
+      <p class="note">Reservation and occupancy are tracked separately. A driver check-in is shown as “unverified” until an operator confirms the vehicle on site.</p>
+    </section>
+  </div>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/js/common.js"></script>
+<script>
+  if (requireRole('operator', 'admin')) init();
+  let facs = [], cur = null, selSlot = null, layoutData = null, bookings = [];
+
+  function init() {
+    renderNav();
+    document.querySelectorAll('.tabs button').forEach((b) => (b.onclick = () => {
+      document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('on', x === b));
+      ['overview', 'layout', 'bookings'].forEach((t) => ($('t-' + t).hidden = t !== b.dataset.t));
+      if (b.dataset.t === 'layout') loadLayout(); if (b.dataset.t === 'bookings') loadBookings();
+    }));
+    $('facSel').onchange = () => pick(+$('facSel').value);
+    $('newFac').onclick = () => facModal(null);
+    $('editFac').onclick = () => facModal(cur);
+    loadFacs();
+  }
+
+  async function loadFacs(selectId) {
+    facs = await api('/operator/facilities');
+    $('empty').hidden = facs.length > 0; $('panel').hidden = facs.length === 0;
+    $('facSel').innerHTML = facs.map((f) => `<option value="${f.id}">${esc(f.name)}</option>`).join('');
+    if (facs.length) { const id = selectId || (cur && cur.id) || facs[0].id; $('facSel').value = id; pick(id); }
+  }
+
+  function pick(id) {
+    cur = facs.find((f) => f.id === id); selSlot = null;
+    $('gW').value = cur.width_m || 20; $('gL').value = cur.length_m || 15;
+    loadOverview();
+    if (!$('t-layout').hidden) loadLayout(); if (!$('t-bookings').hidden) loadBookings();
+  }
+
+  /* ---------- overview ---------- */
+  async function loadOverview() {
+    const f = cur;
+    $('statusBox').innerHTML = `<div class="card row between wrap-sm"><div><b>Verification:</b> ${badge(f.verification_status)} &nbsp; <b>Layout:</b> ${badge(f.layout_status)}
+      ${f.review_note ? `<p class="muted mt">Admin note: ${esc(f.review_note)}</p>` : ''}
+      ${f.verification_status === 'pending' ? '<p class="muted mt">Waiting for admin review of your ownership / authority details. You can prepare the layout meanwhile.</p>' : ''}</div></div>`;
+    $('facInfo').innerHTML = `<h3>${esc(f.name)}</h3><p class="muted">${esc(f.address)} · ${esc(f.kind.replace('_', ' '))}</p>
+      <p class="muted">${inr(f.hourly_rate)}/hr · min ${inr(f.min_charge)} · grace ${f.grace_minutes} min${f.daily_cap ? ' · cap ' + inr(f.daily_cap) + '/day' : ''} · open ${esc(f.open_time)}–${esc(f.close_time)}</p>`;
+    try {
+      const s = await api(`/operator/facilities/${f.id}/stats`);
+      $('stats').innerHTML = [['active_slots', 'Active slots'], ['upcoming', 'Upcoming bookings'], ['parked_now', 'Parked now'], ['bookings_today', 'Bookings today'], ['mismatches', 'Slot mismatches to review'], ['revenue_today', 'Revenue today']]
+        .map(([k, l]) => `<div class="stat"><b>${k === 'revenue_today' ? inr(s[k]) : s[k]}</b><span>${l}</span></div>`).join('');
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  /* ---------- register / edit facility ---------- */
+  function facModal(f) {
+    const t = f || {}; const vt = (t.vehicle_types || 'car,suv,bike').split(',');
+    const m = modal(`<h3>${f ? 'Edit facility' : 'Register facility'}</h3>
+      <div class="grid2"><div><label>Name</label><input id="fName" value="${esc(t.name)}"></div>
+      <div><label>Type</label><select id="fKind">${['garage', 'mall', 'open_ground', 'street', 'other'].map((k) => `<option value="${k}" ${t.kind === k ? 'selected' : ''}>${k.replace('_', ' ')}</option>`).join('')}</select></div></div>
+      <label>Address</label><div class="row gap"><input id="fAddr" value="${esc(t.address)}"><button class="btn ghost sm" type="button" id="fFind">Find on map</button></div>
+      <div id="fMap" class="minimap"></div><p class="note">Click the map to place the pin at the entrance. <span id="fPos"></span></p>
+      <label>Description</label><textarea id="fDesc">${esc(t.description)}</textarea>
+      <div class="grid2"><div><label>Opens</label><input type="time" id="fOpen" value="${esc(t.open_time || '06:00')}"></div><div><label>Closes</label><input type="time" id="fClose" value="${esc(t.close_time || '23:00')}"></div></div>
+      <label>Vehicles allowed</label><div>${['car', 'suv', 'bike'].map((v) => `<label class="chk"><input type="checkbox" class="fVt" value="${v}" ${vt.includes(v) ? 'checked' : ''}>${v}</label>`).join('')}</div>
+      <label>Ownership / authority to operate this site</label><textarea id="fAuth" placeholder="e.g. Owned by XYZ Pvt Ltd; lease / permission letter available">${esc(t.authority_note)}</textarea>
+      <h3 class="mt">Tariff</h3>
+      <div class="grid2"><div><label>Hourly rate (₹)</label><input id="tRate" type="number" min="0" value="${t.hourly_rate ?? 30}"></div><div><label>Minimum charge (₹)</label><input id="tMin" type="number" min="0" value="${t.min_charge ?? 20}"></div>
+      <div><label>Grace period (min)</label><input id="tGrace" type="number" min="0" value="${t.grace_minutes ?? 10}"></div><div><label>Daily cap (₹, optional)</label><input id="tCap" type="number" min="0" value="${t.daily_cap ?? ''}"></div></div>
+      <button class="btn block mt" id="fSave">${f ? 'Save changes' : 'Submit for verification'}</button>`, true);
+
+    let pos = f ? { lat: t.lat, lng: t.lng } : null;
+    const mp = L.map(m.querySelector('#fMap')).setView(pos ? [pos.lat, pos.lng] : [28.6139, 77.2090], pos ? 16 : 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(mp);
+    let mk = pos ? L.marker([pos.lat, pos.lng]).addTo(mp) : null;
+    const setPos = (ll) => { pos = { lat: +ll.lat.toFixed(6), lng: +ll.lng.toFixed(6) }; if (mk) mk.setLatLng(ll); else mk = L.marker(ll).addTo(mp); m.querySelector('#fPos').textContent = `(${pos.lat}, ${pos.lng})`; };
+    if (pos) m.querySelector('#fPos').textContent = `(${pos.lat}, ${pos.lng})`;
+    mp.on('click', (e) => setPos(e.latlng));
+    setTimeout(() => mp.invalidateSize(), 150);
+
+    m.querySelector('#fFind').onclick = async () => {
+      try {
+        const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(m.querySelector('#fAddr').value));
+        const d = await r.json(); if (!d.length) return toast('Address not found', 'err');
+        const ll = { lat: +d[0].lat, lng: +d[0].lon }; mp.setView([ll.lat, ll.lng], 17); setPos(ll);
+      } catch (e) { toast('Search failed', 'err'); }
+    };
+    m.querySelector('#fSave').onclick = async () => {
+      const v = (id) => m.querySelector(id).value;
+      const body = { name: v('#fName'), kind: v('#fKind'), address: v('#fAddr'), description: v('#fDesc'), open_time: v('#fOpen'), close_time: v('#fClose'),
+        vehicle_types: [...m.querySelectorAll('.fVt:checked')].map((c) => c.value).join(','), authority_note: v('#fAuth'),
+        lat: pos && pos.lat, lng: pos && pos.lng, hourly_rate: v('#tRate'), min_charge: v('#tMin'), grace_minutes: v('#tGrace'), daily_cap: v('#tCap') };
+      try {
+        const r = f ? await api('/operator/facilities/' + f.id, { method: 'PUT', body }) : await api('/operator/facilities', { method: 'POST', body });
+        m.close(); toast(f ? 'Saved' : 'Submitted for verification'); loadFacs(f ? f.id : r.id);
+      } catch (e) { toast(e.message, 'err'); }
+    };
+  }
+
+  /* ---------- layout ---------- */
+  const drawLayout = () => renderLayout($('layoutBox'), layoutData.facility, layoutData.slots, {
+    selected: selSlot,
+    onClick: (s) => { selSlot = s.id; showSlot(s); drawLayout(); },
+    onMove: async (id, x, y) => {
+      try { await api(`/operator/slots/${id}`, { method: 'PATCH', body: { x, y } }); toast('Slot moved'); } catch (e) { toast(e.message, 'err'); }
+      loadLayout();
+    },
+  });
+
+  async function loadLayout() {
+    try {
+      const d = await api(`/operator/facilities/${cur.id}/slots`); layoutData = d;
+      $('layoutStatus').innerHTML = badge(d.facility.layout_status);
+      if (!d.slots.length) { $('layoutBox').innerHTML = '<p class="muted" style="padding:20px">No layout yet. Fill in the generator above.</p>'; return showSlot(null); }
+      drawLayout();
+      showSlot(d.slots.find((s) => s.id === selSlot));
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  function showSlot(s) {
+    if (!s) { $('slotPanel').innerHTML = '<h3>Slot details</h3><p class="muted mt">Select a slot on the layout.</p>'; return; }
+    $('slotPanel').innerHTML = `<h3>${esc(s.label)}</h3>
+      <div class="kv"><span>Type</span><b>${esc(s.vehicle_type)}</b><span>Size</span><b>${s.w} × ${s.h} m</b><span>Position</span><b>${s.x}, ${s.y}</b><span>State</span><b style="text-transform:capitalize">${s.state}${s.state === 'occupied' ? (s.occupancy_verified ? ' (verified)' : ' (unverified)') : ''}</b></div>
+      <button class="btn ${s.is_active ? 'ghost' : ''} block" id="tog">${s.is_active ? 'Block / remove this slot' : 'Restore this slot'}</button>`;
+    $('tog').onclick = async () => {
+      try { await api(`/operator/slots/${s.id}`, { method: 'PATCH', body: { is_active: s.is_active ? 0 : 1 } }); loadLayout(); }
+      catch (e) { toast(e.message, 'err'); }
+    };
+  }
+
+  $('gen').onclick = async () => {
+    const obstacles = $('gO').value.split('\n').map((l) => l.split(',').map(Number)).filter((a) => a.length === 4 && a.every(isFinite)).map(([x, y, w, h]) => ({ x, y, w, h }));
+    if (layoutData && layoutData.slots.length && !confirm('This replaces the current layout. Continue?')) return;
+    try {
+      const r = await api(`/operator/facilities/${cur.id}/layout/generate`, { method: 'POST', body: { width: $('gW').value, length: $('gL').value, vehicle: $('gV').value, aisle: $('gA').value, maxSlots: $('gM').value, startNumber: $('gS').value, obstacles } });
+      toast(`Proposed ${r.count} slots. Review, adjust, then publish.`); selSlot = null;
+      facs = await api('/operator/facilities'); cur = facs.find((x) => x.id === cur.id); loadLayout(); loadOverview();
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  $('pub').onclick = async () => {
+    try { const r = await api(`/operator/facilities/${cur.id}/layout/publish`, { method: 'POST' }); toast(r.note); facs = await api('/operator/facilities'); cur = facs.find((x) => x.id === cur.id); loadLayout(); loadOverview(); }
+    catch (e) { toast(e.message, 'err'); }
+  };
+
+  /* ---------- bookings ---------- */
+  async function loadBookings() {
+    try { bookings = await api(`/operator/facilities/${cur.id}/bookings`); } catch (e) { return toast(e.message, 'err'); }
+    drawBookings();
+  }
+  $('bFilter').onchange = drawBookings;
+  function drawBookings() {
+    const f = $('bFilter').value; const rows = bookings.filter((b) => !f || b.status === f);
+    $('bBody').innerHTML = rows.length ? rows.map((b) => `<tr>
+      <td><b>${esc(b.ref)}</b></td><td>${esc(b.user_name)}<br><span class="muted">${esc(b.user_phone || '')}</span></td><td>${esc(b.reg_no)}</td>
+      <td>${esc(b.slot_label)}${b.mismatch ? `<br><span class="badge b-warn">parked in ${esc(b.actual_slot_label)}</span>` : ''}</td>
+      <td>${fmt(b.start_time)}<br>→ ${fmt(b.end_time)}</td>
+      <td>${badge(b.status)}${b.status === 'checked_in' ? `<br><span class="muted">${b.occupancy_verified ? 'verified' : 'unverified'} · ${inr(b.fee_estimate)} so far</span>` : ''}${b.status === 'completed' ? `<br><span class="muted">${inr(b.fee)}</span>` : ''}${b.resolution_note ? `<br><span class="muted">Note: ${esc(b.resolution_note)}</span>` : ''}</td>
+      <td><div class="row gap wrap-sm">
+        ${b.status === 'confirmed' ? `<button class="btn sm" data-a="in" data-id="${b.id}">Check in</button><button class="btn ghost sm" data-a="cancel" data-id="${b.id}">Cancel</button>` : ''}
+        ${b.status === 'checked_in' ? `<button class="btn sm" data-a="out" data-id="${b.id}">Check out</button>` : ''}
+        ${b.status === 'checked_in' && !b.occupancy_verified ? `<button class="btn ghost sm" data-a="verify" data-id="${b.id}" title="Confirm the vehicle is on site">Verify</button>` : ''}
+        ${b.mismatch && !b.resolution_note ? `<button class="btn ghost sm" data-a="res" data-id="${b.id}">Resolve</button>` : ''}
+        ${b.status === 'completed' ? `<button class="btn ghost sm" data-a="rec" data-id="${b.id}">Receipt</button>` : ''}
+      </div></td></tr>`).join('') : '<tr><td colspan="7" class="muted">No bookings found.</td></tr>';
+  }
+  $('bBody').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-a]'); if (!btn) return;
+    const b = bookings.find((x) => x.id === +btn.dataset.id); const a = btn.dataset.a;
+    const refresh = () => { loadBookings(); loadOverview(); };
+    try {
+      if (a === 'in') await checkinDialog(b, `/operator/bookings/${b.id}/checkin`, false, refresh);
+      if (a === 'cancel' && confirm('Cancel this booking?')) { await api(`/operator/bookings/${b.id}/cancel`, { method: 'POST' }); refresh(); }
+      if (a === 'out' && confirm('Record check-out and calculate the fee?')) { const r = await api(`/operator/bookings/${b.id}/checkout`, { method: 'POST' }); refresh(); receiptModal(r); }
+      if (a === 'rec') receiptModal(b);
+      if (a === 'res') { const note = prompt('Resolution note (e.g. "Driver moved to Slot 34")'); if (note) { await api(`/operator/bookings/${b.id}/resolve`, { method: 'POST', body: { note } }); refresh(); } }
+      if (a === 'verify' && confirm('Confirm you have seen this vehicle in its slot?')) { await api(`/operator/bookings/${b.id}/verify`, { method: 'POST' }); toast('Occupancy verified'); refresh(); }
+    } catch (err) { toast(err.message, 'err'); }
+  });
+</script>
+</body>
+</html>

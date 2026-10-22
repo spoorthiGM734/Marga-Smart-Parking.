@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MARGA – Find parking</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header id="nav"></header>
+<div class="search-page">
+  <aside class="side">
+    <h2>Find parking</h2>
+    <label>Destination</label>
+    <div class="row gap"><input id="q" placeholder="e.g. Connaught Place"><button class="btn ghost sm" id="loc" title="Use my location">📍</button></div>
+    <div class="grid2">
+      <div><label>From</label><input type="datetime-local" id="from"></div>
+      <div><label>Until</label><input type="datetime-local" id="to"></div>
+    </div>
+    <div class="grid2">
+      <div><label>Vehicle</label><select id="veh"><option value="car">Car</option><option value="suv">SUV</option><option value="bike">Bike</option></select></div>
+      <div><label>Search radius</label><select id="rad"><option value="0.5">0.5 km</option><option value="1" selected>1 km</option><option value="2">2 km</option><option value="5">5 km</option></select></div>
+    </div>
+    <label>What matters most?</label>
+    <select id="pref"><option value="balanced">Balanced</option><option value="cheapest">Cheapest</option><option value="closest">Closest to destination</option></select>
+    <button class="btn block mt" id="go">Search</button>
+    <div id="out"></div>
+  </aside>
+  <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/js/common.js"></script>
+<script>
+  renderNav();
+  const map = L.map('map').setView([28.6139, 77.2090], 13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap contributors' }).addTo(map);
+  const layer = L.layerGroup().addTo(map);
+  const icon = (txt, cls) => L.divIcon({ className: '', html: `<div class="mk ${cls || ''}"><span>${txt}</span></div>`, iconSize: [32, 32], iconAnchor: [16, 32] });
+
+  const now = new Date();
+  $('from').value = toLocalInput(now);
+  $('to').value = toLocalInput(new Date(now.getTime() + 2 * 3600e3));
+  let dest = null;
+
+  async function geocode(q) {
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+    const d = await r.json();
+    if (!d.length) throw new Error('Destination not found. Try a more specific name.');
+    return { lat: +d[0].lat, lng: +d[0].lon, name: d[0].display_name };
+  }
+
+  async function run() {
+    const out = $('out');
+    try {
+      if (!dest || dest.q !== $('q').value.trim()) {
+        if (!$('q').value.trim()) throw new Error('Enter a destination first');
+        out.innerHTML = '<p class="muted mt">Locating destination…</p>';
+        dest = { ...(await geocode($('q').value.trim())), q: $('q').value.trim() };
+      }
+      const start = new Date($('from').value).toISOString(), end = new Date($('to').value).toISOString();
+      if (new Date(end) <= new Date(start)) throw new Error('"Until" must be after "From"');
+      out.innerHTML = '<p class="muted mt">Searching…</p>';
+      const p = new URLSearchParams({ lat: dest.lat, lng: dest.lng, radius: $('rad').value, start, end, vehicle: $('veh').value, pref: $('pref').value });
+      const d = await api('/facilities/search?' + p);
+      draw(d, start, end);
+    } catch (e) { out.innerHTML = ''; toast(e.message, 'err'); }
+  }
+
+  function draw(d, start, end) {
+    layer.clearLayers();
+    L.marker([dest.lat, dest.lng], { icon: icon('★', 'dest') }).addTo(layer).bindPopup('Your destination');
+    L.circle([dest.lat, dest.lng], { radius: d.radius * 1000, color: '#b7ff3c', weight: 1, fillOpacity: 0.04 }).addTo(layer);
+    const pts = [[dest.lat, dest.lng]];
+    if (!d.results.length) {
+      map.setView([dest.lat, dest.lng], 15);
+      $('out').innerHTML = '<div class="card mt"><h3>No verified parking in range</h3><p class="muted">Try a larger radius or another destination.</p></div>';
+      return;
+    }
+    let html = `<p class="note mt">${d.results.length} facilit${d.results.length > 1 ? 'ies' : 'y'} within ${d.radius} km · ${esc(d.note)}</p>`;
+    let shownAlt = false;
+    d.results.forEach((f, i) => {
+      pts.push([f.lat, f.lng]);
+      L.marker([f.lat, f.lng], { icon: icon(i + 1, f.available ? '' : 'full') }).addTo(layer).bindPopup(`<b>${esc(f.name)}</b><br>${f.available} free`);
+      if (!f.available && !shownAlt) { shownAlt = true; html += '<h3 class="mt2">Fully booked for this time</h3>'; }
+      const link = `/facility.html?id=${f.id}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&vehicle=${$('veh').value}`;
+      html += `<div class="card res ${i === 0 && f.available ? 'best' : ''}">
+        <div class="row between"><h3>${i + 1}. ${esc(f.name)}</h3>${i === 0 && f.available ? '<span class="badge b-ok">Best match</span>' : !f.available ? '<span class="badge b-err">Full</span>' : ''}</div>
+        <p class="muted">${esc(f.address)}</p>
+        <div class="row between mt"><span class="price">${inr(f.hourly_rate)}<small class="muted" style="font-size:.8rem">/hr</small></span><span>Est. ${inr(f.est_cost)} for your stay</span></div>
+        <ul>${f.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+        <a class="btn block sm mt" href="${link}">${f.available ? 'View slots &amp; book' : 'View layout'}</a></div>`;
+    });
+    $('out').innerHTML = html;
+    map.fitBounds(pts, { padding: [50, 50], maxZoom: 16 });
+  }
+
+  $('go').onclick = run;
+  $('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
+  $('loc').onclick = () => {
+    if (!navigator.geolocation) return toast('Location is not supported by this browser', 'err');
+    navigator.geolocation.getCurrentPosition((p) => { dest = { lat: p.coords.latitude, lng: p.coords.longitude, q: 'My location' }; $('q').value = 'My location'; run(); },
+      () => toast('Could not get your location', 'err'));
+  };
+  const q0 = new URLSearchParams(location.search).get('q');
+  if (q0) { $('q').value = q0; run(); }
+</script>
+</body>
+</html>

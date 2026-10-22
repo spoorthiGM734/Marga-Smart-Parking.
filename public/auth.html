@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MARGA – Log in</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header id="nav"></header>
+<main class="wrap">
+  <div class="auth card">
+    <div class="seg"><button id="tLogin" class="on">Log in</button><button id="tReg">Sign up</button></div>
+
+    <form id="fLogin">
+      <label>Email</label><input type="email" id="lEmail" required>
+      <label>Password</label><input type="password" id="lPass" required>
+      <button class="btn block mt">Log in</button>
+      <p class="note mt">Demo accounts:<br>Driver: driver@marga.app / Driver@123<br>Operator: operator@marga.app / Operator@123<br>Admin: admin@marga.app / Admin@123</p>
+    </form>
+
+    <form id="fReg" hidden>
+      <label>I am a…</label>
+      <select id="rRole"><option value="driver">Driver – I want to find parking</option><option value="operator">Operator – I manage parking space</option></select>
+      <label>Full name</label><input id="rName" required>
+      <label>Email</label><input type="email" id="rEmail" required>
+      <label>Phone</label><input id="rPhone">
+      <label>Password (min 6 characters)</label><input type="password" id="rPass" minlength="6" required>
+      <button class="btn block mt">Create account</button>
+    </form>
+  </div>
+</main>
+<script src="/js/common.js"></script>
+<script>
+  renderNav();
+  const qs = new URLSearchParams(location.search);
+  const show = (reg) => { $('fLogin').hidden = reg; $('fReg').hidden = !reg; $('tLogin').className = reg ? '' : 'on'; $('tReg').className = reg ? 'on' : ''; };
+  $('tLogin').onclick = () => show(false); $('tReg').onclick = () => show(true);
+  if (qs.get('tab') === 'register') show(true);
+  if (qs.get('role') === 'operator') $('rRole').value = 'operator';
+
+  function done(r) {
+    store.save(r.token, r.user);
+    const next = qs.get('next');
+    location.href = next && next.startsWith('/') ? next : HOME[r.user.role];
+  }
+  $('fLogin').onsubmit = async (e) => {
+    e.preventDefault();
+    try { done(await api('/auth/login', { method: 'POST', body: { email: $('lEmail').value, password: $('lPass').value } })); }
+    catch (err) { toast(err.message, 'err'); }
+  };
+  $('fReg').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      done(await api('/auth/register', { method: 'POST', body: { name: $('rName').value, email: $('rEmail').value, phone: $('rPhone').value, password: $('rPass').value, role: $('rRole').value } }));
+    } catch (err) { toast(err.message, 'err'); }
+  };
+</script>
+</body>
+</html>

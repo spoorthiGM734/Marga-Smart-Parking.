@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MARGA – Choose your slot</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header id="nav"></header>
+<main class="wrap" style="padding-top:26px;padding-bottom:50px">
+  <a href="javascript:history.back()" class="muted">← Back to results</a>
+  <div class="row between wrap-sm mt">
+    <div><h1 id="fName">Loading…</h1><p class="muted" id="fAddr"></p></div>
+    <div id="fMeta" class="row gap wrap-sm"></div>
+  </div>
+
+  <div class="card mt">
+    <div class="grid4" style="align-items:end">
+      <div><label>From</label><input type="datetime-local" id="from"></div>
+      <div><label>Until</label><input type="datetime-local" id="to"></div>
+      <div><label>Vehicle type</label><select id="veh"><option value="car">Car</option><option value="suv">SUV</option><option value="bike">Bike</option></select></div>
+      <button class="btn" id="upd">Update availability</button>
+    </div>
+  </div>
+
+  <div class="fac-grid mt">
+    <div>
+      <div class="layout-box" id="layout"></div>
+      <div class="legend">
+        <span><i style="background:rgba(183,255,60,.5)"></i>Available</span>
+        <span><i style="background:rgba(255,200,87,.6)"></i>Reserved</span>
+        <span><i style="background:rgba(255,107,107,.6)"></i>Occupied</span>
+        <span><i style="background:#555b73"></i>Blocked</span>
+        <span><i style="background:#b7ff3c"></i>Your selection</span>
+      </div>
+      <p class="note">This is a digital layout of virtual parking spaces. Spaces may not be physically marked on the ground – follow the operator’s on-site guidance.</p>
+    </div>
+
+    <aside class="card" id="panel">
+      <h3>Your booking</h3>
+      <p class="muted mt" id="hint">Tap an available slot on the layout.</p>
+      <div id="form" hidden>
+        <div class="kv"><span>Slot</span><b id="sLabel"></b><span>Time</span><b id="sTime"></b><span>Rate</span><b id="sRate"></b><span>Estimated cost</span><b id="sEst" style="color:var(--lime)"></b></div>
+        <label>Vehicle registration number</label>
+        <input id="reg" list="myVeh" placeholder="e.g. DL01AB1234" autocomplete="off">
+        <datalist id="myVeh"></datalist>
+        <button class="btn block mt" id="book">Reserve this slot</button>
+        <p class="note">You pay on check-out based on the time actually parked. Reservations not checked in within 30 minutes of start are released.</p>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<script src="/js/common.js"></script>
+<script>
+  renderNav();
+  const qs = new URLSearchParams(location.search);
+  const id = qs.get('id');
+  let fac, slots = [], sel = null, myVeh = [];
+
+  const start0 = qs.get('start') ? new Date(qs.get('start')) : new Date();
+  $('from').value = toLocalInput(start0);
+  $('to').value = toLocalInput(qs.get('end') ? new Date(qs.get('end')) : new Date(start0.getTime() + 2 * 3600e3));
+  $('veh').value = qs.get('vehicle') || 'car';
+
+  const win = () => ({ start: new Date($('from').value).toISOString(), end: new Date($('to').value).toISOString() });
+  const compatible = (v, s) => (v === 'bike' ? s === 'bike' : v === 'car' ? s === 'car' || s === 'suv' : s === 'suv');
+
+  async function loadFacility() {
+    fac = await api('/facilities/' + id);
+    $('fName').textContent = fac.name; $('fAddr').textContent = fac.address;
+    $('fMeta').innerHTML = `<span class="badge b-ok">${inr(fac.hourly_rate)}/hr</span><span class="badge b-mute">Open ${esc(fac.open_time)}–${esc(fac.close_time)}</span>` +
+      (fac.daily_cap ? `<span class="badge b-mute">Daily cap ${inr(fac.daily_cap)}</span>` : '') +
+      (fac.grace_minutes ? `<span class="badge b-mute">${fac.grace_minutes} min grace</span>` : '') +
+      `<a class="btn ghost sm" target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${fac.lat},${fac.lng}">Navigate</a>`;
+    document.title = fac.name + ' – MARGA';
+  }
+
+  async function loadSlots() {
+    const { start, end } = win();
+    if (new Date(end) <= new Date(start)) return toast('"Until" must be after "From"', 'err');
+    const d = await api(`/facilities/${id}/slots?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+    slots = d.slots; if (sel && !slots.find((s) => s.id === sel.id && s.state === 'available')) { sel = null; showForm(); }
+    draw();
+  }
+
+  function draw() {
+    const v = $('veh').value;
+    // slots that are free but wrong for this vehicle type are shown as blocked
+    const view = slots.map((s) => (s.state === 'available' && !compatible(v, s.vehicle_type) ? { ...s, state: 'blocked' } : s));
+    renderLayout($('layout'), fac, view, { selected: sel && sel.id, onClick: (s) => {
+      if (s.state !== 'available') return toast(s.state === 'blocked' ? `${s.label} is not available for ${v} vehicles` : `${s.label} is ${s.state} for this time`, 'err');
+      sel = s; showForm(); draw();
+    } });
+  }
+
+  function showForm() {
+    $('form').hidden = !sel; $('hint').hidden = !!sel;
+    if (!sel) return;
+    const { start, end } = win();
+    const mins = Math.ceil((new Date(end) - new Date(start)) / 60000);
+    $('sLabel').textContent = sel.label;
+    $('sTime').textContent = `${fmt(start)} → ${fmt(end)}`;
+    $('sRate').textContent = inr(fac.hourly_rate) + '/hr';
+    $('sEst').textContent = inr(calcFee(mins, fac));
+  }
+
+  $('upd').onclick = () => { sel = null; showForm(); loadSlots().catch((e) => toast(e.message, 'err')); };
+  $('veh').onchange = () => { sel = null; showForm(); draw(); };
+
+  $('book').onclick = async () => {
+    if (!store.token) { location.href = '/auth.html?next=' + encodeURIComponent(location.pathname + location.search); return; }
+    const { start, end } = win();
+    const reg = $('reg').value.trim();
+    const match = myVeh.find((v) => v.reg_no === reg.toUpperCase().replace(/\s+/g, ''));
+    $('book').disabled = true;
+    try {
+      const r = await api('/bookings', { method: 'POST', body: { slot_id: sel.id, start, end, reg_no: reg, vehicle_type: $('veh').value, vehicle_id: match && match.id } });
+      const b = await api('/bookings/' + r.id);
+      const m = modal(`<h3 style="color:var(--lime)">Booking confirmed 🎉</h3>
+        <div style="text-align:center;margin:14px 0"><img src="${b.qr}" alt="QR" style="width:200px;border-radius:12px"><h2 style="margin-top:8px;letter-spacing:.08em">${esc(b.ref)}</h2></div>
+        <div class="kv"><span>Facility</span><b>${esc(b.facility_name)}</b><span>Slot</span><b>${esc(b.slot_label)}</b><span>Vehicle</span><b>${esc(b.reg_no)}</b><span>Time</span><b>${fmt(b.start_time)} → ${fmt(b.end_time)}</b></div>
+        <p class="note">The QR code identifies your booking for verification. It does not prove physical occupancy.</p>
+        <a class="btn block" href="/dashboard.html">Go to my bookings</a>`);
+      m.addEventListener('mousedown', (e) => { if (e.target === m) location.href = '/dashboard.html'; });
+    } catch (e) { toast(e.message, 'err'); sel = null; showForm(); loadSlots().catch(() => {}); }
+    $('book').disabled = false;
+  };
+
+  (async () => {
+    try {
+      await loadFacility();
+      if (store.token) {
+        myVeh = await api('/vehicles').catch(() => []);
+        $('myVeh').innerHTML = myVeh.map((v) => `<option value="${esc(v.reg_no)}">${esc(v.label || v.type)}</option>`).join('');
+        if (myVeh[0]) $('reg').value = myVeh[0].reg_no;
+      }
+      await loadSlots();
+    } catch (e) { $('fName').textContent = 'Facility not found'; toast(e.message, 'err'); }
+  })();
+</script>
+</body>
+</html>

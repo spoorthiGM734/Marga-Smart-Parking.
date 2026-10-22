@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MARGA – Admin</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header id="nav"></header>
+<main class="wrap" style="padding-top:28px;padding-bottom:60px">
+  <h1>Admin console</h1><p class="muted">Verify parking facilities before they are shown to drivers.</p>
+  <div class="grid3 mt" id="stats" style="grid-template-columns:repeat(6,1fr)"></div>
+  <div class="row between wrap-sm mt2"><h2>Facilities</h2>
+    <select id="flt" style="width:180px"><option value="pending">Pending review</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="">All</option></select></div>
+  <div id="list" class="mt"></div>
+</main>
+<script src="/js/common.js"></script>
+<script>
+  if (requireRole('admin')) init();
+  let items = [];
+  async function init() {
+    renderNav(); $('flt').onchange = load; load(); stats();
+  }
+  async function stats() {
+    const s = await api('/admin/stats').catch(() => null); if (!s) return;
+    $('stats').innerHTML = [['drivers', 'Drivers'], ['operators', 'Operators'], ['facilities', 'Facilities'], ['pending', 'Pending'], ['bookings', 'Bookings'], ['revenue', 'Revenue']]
+      .map(([k, l]) => `<div class="stat"><b style="font-size:1.4rem">${k === 'revenue' ? inr(s[k]) : s[k]}</b><span>${l}</span></div>`).join('');
+  }
+  async function load() {
+    try { items = await api('/admin/facilities' + ($('flt').value ? '?status=' + $('flt').value : '')); } catch (e) { return toast(e.message, 'err'); }
+    $('list').innerHTML = items.length ? items.map((f) => `<div class="card" style="margin-bottom:14px">
+      <div class="row between wrap-sm"><div><h3>${esc(f.name)}</h3><p class="muted">${esc(f.address)} · ${esc(f.kind.replace('_', ' '))}</p></div>${badge(f.verification_status)}</div>
+      <div class="kv"><span>Operator</span><b>${esc(f.owner_name)} (${esc(f.owner_email)})</b><span>Location</span><b>${f.lat}, ${f.lng} · <a target="_blank" href="https://www.openstreetmap.org/?mlat=${f.lat}&mlon=${f.lng}#map=18/${f.lat}/${f.lng}">view map</a></b>
+      <span>Rate</span><b>${inr(f.hourly_rate)}/hr</b><span>Layout</span><b>${esc(f.layout_status)} · ${f.slot_count} slots</b>
+      <span>Ownership / authority</span><b>${esc(f.authority_note)}</b>${f.review_note ? `<span>Review note</span><b>${esc(f.review_note)}</b>` : ''}</div>
+      <div class="row gap mt">
+        ${f.verification_status !== 'approved' ? `<button class="btn sm" data-a="approved" data-id="${f.id}">Approve</button>` : ''}
+        ${f.verification_status !== 'rejected' ? `<button class="btn danger sm" data-a="rejected" data-id="${f.id}">Reject</button>` : ''}
+      </div></div>`).join('') : '<div class="card"><p class="muted">Nothing here.</p></div>';
+  }
+  $('list').addEventListener('click', async (e) => {
+    const b = e.target.closest('button[data-a]'); if (!b) return;
+    const note = prompt(b.dataset.a === 'approved' ? 'Optional note for the operator:' : 'Reason for rejection:');
+    if (note === null) return;
+    try { await api(`/admin/facilities/${b.dataset.id}/review`, { method: 'POST', body: { status: b.dataset.a, note } }); toast('Updated'); load(); stats(); }
+    catch (err) { toast(err.message, 'err'); }
+  });
+</script>
+</body>
+</html>
